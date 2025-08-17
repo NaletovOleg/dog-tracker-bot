@@ -10,11 +10,11 @@ from flask import Flask
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
-# ====== НАСТРОЙКИ ======
+# ========= НАСТРОЙКИ =========
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-DB_PATH = os.getenv("DB_PATH", "dog_events.csv")  # на Free-деплое файл переживает рестарт, но пропадёт при redeploy
+DB_PATH = os.getenv("DB_PATH", "dog_events.csv")  # На Free Render файл стирается при redeploy
 
-# ====== КЛАВИАТУРА ======
+# ========= КНОПКИ =========
 KEY_WALK_START = "Прогулка 🐾"
 KEY_WALK_END   = "Прогулка завершена ⏱"
 KEY_PEE        = "Лужа 🚰"
@@ -41,11 +41,12 @@ MAIN_KB = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 
-# ====== УТИЛИТЫ ======
+# ========= УТИЛИТЫ =========
 def now_str() -> str:
     return dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 def ensure_csv_headers(path: str):
+    """Создаёт CSV с заголовком, если нет или пустой."""
     if not os.path.exists(path) or os.path.getsize(path) == 0:
         with open(path, "w", newline="", encoding="utf-8") as f:
             csv.writer(f).writerow(["timestamp", "event", "user"])
@@ -63,14 +64,15 @@ def load_df() -> pd.DataFrame:
         return pd.DataFrame(columns=["timestamp", "event", "user"])
     df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
     df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
-    for col in ["event", "user"]:
-        if col in df.columns:
-            df[col] = df[col].astype(str)
-        else:
+    for col in ("event", "user"):
+        if col not in df.columns:
             df[col] = ""
+        else:
+            df[col] = df[col].astype(str)
     return df
 
 def pair_walks_today(df_today: pd.DataFrame):
+    """Парсит пары (start,end) за сегодня в порядке нажатий."""
     starts = df_today[df_today["event"] == KEY_WALK_START]["timestamp"].tolist()
     ends   = df_today[df_today["event"] == KEY_WALK_END]["timestamp"].tolist()
     pairs = []
@@ -89,6 +91,7 @@ def format_times(series: pd.Series) -> str:
     return ", ".join(pd.to_datetime(series).dt.strftime("%H:%M").tolist())
 
 def mean_and_sigma_minutes(times: List[dt.time]):
+    """Среднее время HH:MM и σ минут для списка time()."""
     if not times:
         return "—", 0, 0
     minutes = [t.hour * 60 + t.minute for t in times]
@@ -97,13 +100,13 @@ def mean_and_sigma_minutes(times: List[dt.time]):
     h, m = divmod(int(avg + 0.5), 60)
     return f"{h:02d}:{m:02d}", int(sigma), len(times)
 
-# ====== TELEGRAM ХЕНДЛЕРЫ ======
+# ========= ХЕНДЛЕРЫ =========
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Привет! 🐶 Бот работает.\n"
-        "«График дня» покажет минуты прогулок за сегодня,\n"
+        "«График дня» — минуты прогулок за сегодня.\n"
         "«Регулярность» — среднее время и разброс за 14 дней.\n"
-        "Кнопка «Сбросить статистику» очищает все записи.",
+        "«Сбросить статистику» очищает все записи.",
         reply_markup=MAIN_KB,
     )
 
@@ -119,7 +122,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Нет данных для экспорта.")
         return
 
-    # Сброс статистики
+    # Сброс
     if text == KEY_RESET:
         try:
             if os.path.exists(DB_PATH):
@@ -143,6 +146,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if df_today.empty:
             await update.message.reply_text("Сегодня ещё нет событий 🐶")
             return
+
         pairs = pair_walks_today(df_today)
         total_minutes = sum(max(0, int((e - s).total_seconds() // 60)) for s, e in pairs)
 
@@ -192,7 +196,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("\n".join(msg), reply_markup=MAIN_KB)
         return
 
-    # Остальные кнопки — лог
+    # Остальные кнопки — просто лог
     if text in {KEY_WALK_START, KEY_WALK_END, KEY_PEE, KEY_POO, KEY_PEE_HOME, KEY_POO_HOME, KEY_FEED}:
         log_event(text, user)
         await update.message.reply_text(f"✅ {text} сохранено", reply_markup=MAIN_KB)
@@ -200,7 +204,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("Не понял. Используй кнопки ниже или /start.", reply_markup=MAIN_KB)
 
-# ====== TELEGRAM APP ======
+# ========= TELEGRAM APP =========
 def build_app() -> Application:
     if not BOT_TOKEN:
         raise SystemExit("❗ Установите переменную окружения BOT_TOKEN (токен от @BotFather).")
@@ -209,12 +213,7 @@ def build_app() -> Application:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     return app
 
-def start_polling():
-    tg_app = build_app()
-    # run_polling блокирует поток → запускаем в отдельном
-    tg_app.run_polling(close_loop=False)
-
-# ====== FLASK (HTTP-заглушка для Render Web Service Free) ======
+# ========= FLASK (HTTP-заглушка для Render Free Web Service) =========
 flask_app = Flask(__name__)
 
 @flask_app.get("/")
@@ -225,11 +224,16 @@ def root():
 def health():
     return "ok"
 
-if __name__ == "__main__":
-    # 1) запускаем бота в отдельном потоке
-    t = threading.Thread(target=start_polling, daemon=True)
-    t.start()
-
-    # 2) запускаем HTTP-сервер, чтобы Render Free держал сервис живым
+def run_flask():
     port = int(os.environ.get("PORT", 5000))
-    flask_app.run(host="0.0.0.0", port=port)
+    flask_app.run(host="0.0.0.0", port=port, threaded=True)
+
+def main():
+    # 1) Flask в фоне, чтобы Render видел открытый порт
+    threading.Thread(target=run_flask, daemon=True).start()
+    # 2) Telegram-бот в ГЛАВНОМ потоке
+    tg_app = build_app()
+    tg_app.run_polling()
+
+if __name__ == "__main__":
+    main()
